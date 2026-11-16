@@ -332,7 +332,7 @@ class Parser {
     if (token === 'true' || token === 'false') return { kind: 'boolean', value: token === 'true' };
     if (token === 'null') return { kind: 'null' };
     if (/^-?\d+$/.test(token)) return { kind: 'int', value: Number(token) };
-    if (/^-?\d*\.\d/.test(token) || /[eE]/.test(token)) return { kind: 'float', value: Number(token) };
+    if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(token) && /[.eE]/.test(token)) return { kind: 'float', value: Number(token) };
     return { kind: 'enum', value: token };
   }
 }
