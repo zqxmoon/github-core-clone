@@ -536,12 +536,26 @@ export class Repo {
     return seen;
   }
 
-  /** True when `ancestor` is `descendant` itself or one of its ancestors. */
+  /** True when `ancestor` is `descendant` itself or one of its ancestors (early-exit walk). */
   isAncestor(ancestor: string, descendant: string): boolean {
     const target = this.peelToCommit(ancestor);
     const from = this.peelToCommit(descendant);
     if (target === null || from === null) return false;
-    return this.reachableCommits([from]).has(target);
+    if (target === from) return true;
+    const seen = new Set<string>();
+    const queue: string[] = [from];
+    while (queue.length > 0) {
+      const oid = queue.pop() as string;
+      if (seen.has(oid)) continue;
+      seen.add(oid);
+      const info = this.commitOf(oid);
+      if (!info) continue;
+      for (const parent of info.parents) {
+        if (parent === target) return true;
+        queue.push(parent);
+      }
+    }
+    return false;
   }
 
   /** The merge-base of two commits: a common ancestor with the greatest generation. */
