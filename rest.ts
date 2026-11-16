@@ -3,9 +3,6 @@
 // the path is not theirs; app.ts turns null into the JSON 404 the protocol checks expect.
 
 import {
-  CommentState,
-  IssueState,
-  PullState,
   Repo,
   VIEWER_ID,
   VIEWER_LOGIN,
@@ -16,10 +13,11 @@ import {
   isoOf,
   mergePull,
   nextTimestampSec,
-  parseCommit,
   parseTree,
 } from './forge.ts';
-import { Ctx, Reply, errorReply, globalId, jsonReply } from './http.ts';
+import type { CommentState, IssueState, PullState } from './forge.ts';
+import { errorReply, globalId, jsonReply } from './http.ts';
+import type { Ctx, Reply } from './http.ts';
 
 // ---------------------------------------------------------------------------
 // JSON shapes
@@ -384,7 +382,6 @@ function listCommits(ctx: Ctx, repo: Repo): Reply {
   const slice = paginate(ordered, page);
   const commits = slice.map(([oid]) => {
     const info = repo.commitOf(oid) as NonNullable<ReturnType<Repo['commitOf']>>;
-    void parseCommit;
     return {
       sha: oid,
       commit: {

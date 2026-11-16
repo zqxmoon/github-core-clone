@@ -16,7 +16,7 @@ import {
   uploadAdvertisementV0,
   uploadAdvertisementV2,
 } from './git.ts';
-import { Ctx, Reply } from './http.ts';
+import type { Ctx, Reply } from './http.ts';
 import { handleRest } from './rest.ts';
 import { handleGraphQL } from './graphql.ts';
 import { handleMcp } from './mcp.ts';
@@ -137,10 +137,8 @@ function handleGit(ctx: Ctx): Reply | null {
 
   if (tail.length === 1 && tail[0] === 'git-upload-pack' && ctx.method === 'POST') {
     if (repo === null) return { status: 404, body: { message: 'Not Found' } };
-    let packets;
-    try {
-      packets = parsePackets(ctx.rawBody).packets;
-    } catch {
+    const packets = parsePackets(ctx.rawBody).packets;
+    if (packets.length === 0 && ctx.rawBody.length > 0) {
       return { status: 400, body: { message: 'malformed pkt-line request' } };
     }
     const parsed = parseFetchBody(packets);

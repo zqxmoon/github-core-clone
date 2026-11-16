@@ -4,8 +4,9 @@
 // are thin wrappers over the same forge operations REST and GraphQL use, so an object made
 // over MCP is the same object over REST.
 
-import { Repo, VIEWER_LOGIN, createIssue, createPull, forge, mergePull } from './forge.ts';
-import { Ctx, Reply } from './http.ts';
+import { VIEWER_LOGIN, createIssue, createPull, forge, mergePull } from './forge.ts';
+import type { Repo } from './forge.ts';
+import type { Ctx, Reply } from './http.ts';
 import { issueJson, pullJson, repoJson } from './rest.ts';
 
 const SERVER_INFO = { name: 'github-core-clone', version: '1.0.0' };

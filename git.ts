@@ -5,13 +5,13 @@
 import {
   Repo,
   ZERO_OID,
-  GitObject,
   parseCommit,
   parseTag,
   parseTree,
   readPack,
   writePack,
 } from './forge.ts';
+import type { GitObject } from './forge.ts';
 
 // ---------------------------------------------------------------------------
 // pkt-line codec
@@ -39,7 +39,9 @@ export function parsePackets(buffer: Buffer): { packets: Packet[]; rest: Buffer 
   let offset = 0;
   while (offset + 4 <= buffer.length) {
     const header = buffer.subarray(offset, offset + 4).toString('ascii');
-    if (!/^[0-9a-fA-F]{4}$/.test(header)) throw new Error('bad pkt-line header');
+    // Not a pkt-line header: the packet stream ends here (a receive-pack packfile, whose
+    // first four bytes are 'PACK', is the usual case). The caller reads the rest itself.
+    if (!/^[0-9a-fA-F]{4}$/.test(header)) break;
     const length = parseInt(header, 16);
     if (length === 0) {
       packets.push({ kind: 'flush' });
@@ -193,6 +195,8 @@ export interface FetchRequest {
   haves: string[];
   shallow: string[];
   depth: number | null;
+  deepenRelative: boolean;
+  done: boolean;
 }
 
 interface FetchPlan {
@@ -213,14 +217,30 @@ function planFetch(repo: Repo, request: FetchRequest): FetchPlan {
     const commit = repo.peelToCommit(boundary);
     if (commit !== null) shallowHeld.add(commit);
   }
-  // Objects the client provably holds: everything reachable from its haves, plus its shallow
-  // boundary commits and their trees (their ancestors are unknown to it and stay unsent).
-  const excludedObjects = repo.reachableObjects(request.haves);
-  for (const commit of shallowHeld) {
-    excludedObjects.add(commit);
-    const info = repo.commitOf(commit);
-    if (info) {
-      for (const oid of repo.reachableObjects([info.tree])) excludedObjects.add(oid);
+  // Objects the client provably holds: everything reachable from its haves, with the walk
+  // cut at its shallow boundary — a boundary commit and its tree are held, its parents are
+  // unknown to the client and prove nothing (any have's ancestry truncates there too).
+  const excludedObjects = new Set<string>();
+  {
+    const queue: string[] = [...request.haves, ...request.shallow];
+    while (queue.length > 0) {
+      const oid = queue.pop() as string;
+      if (excludedObjects.has(oid)) continue;
+      const object = repo.getObject(oid);
+      if (!object) continue;
+      excludedObjects.add(oid);
+      if (object.type === 'commit') {
+        const info = parseCommit(object.data);
+        queue.push(info.tree);
+        const commit = repo.peelToCommit(oid);
+        if (commit === null || !shallowHeld.has(commit)) queue.push(...info.parents);
+      } else if (object.type === 'tag') {
+        queue.push(parseTag(object.data).object);
+      } else if (object.type === 'tree') {
+        for (const entry of parseTree(object.data)) {
+          if (entry.mode !== '160000') queue.push(entry.oid);
+        }
+      }
     }
   }
 
@@ -233,21 +253,31 @@ function planFetch(repo: Repo, request: FetchRequest): FetchPlan {
   }
 
   if (request.depth !== null && request.depth > 0) {
-    // Breadth-first by generation from the wants; generation == depth is the new boundary.
-    const generation = new Map<string, number>();
+    // Breadth-first from the wants. Absolute deepen counts generations from the want
+    // (generation depth-1 is the new boundary). deepen-relative counts only the edges past
+    // the client's current shallow boundary: edges inside the held region are free, the
+    // first edge out of a boundary commit costs 1, and cost == depth is the new boundary.
+    const depth = request.depth;
+    const level = new Map<string, number>();
     const queue: Array<[string, number]> = wantCommits.map((commit) => [commit, 0]);
     while (queue.length > 0) {
       const [oid, gen] = queue.shift() as [string, number];
-      if (generation.has(oid)) continue;
-      generation.set(oid, gen);
-      if (gen >= (request.depth as number) - 1) {
+      if (level.has(oid) && (level.get(oid) as number) <= gen) continue;
+      level.set(oid, gen);
+      const atBoundary = request.deepenRelative ? gen >= depth : gen >= depth - 1;
+      if (atBoundary) {
         boundary.add(oid);
         continue;
       }
       const info = repo.commitOf(oid);
-      if (info) for (const parent of info.parents) queue.push([parent, gen + 1]);
+      if (info) {
+        for (const parent of info.parents) {
+          const nextGen = request.deepenRelative ? (shallowHeld.has(oid) || gen > 0 ? gen + 1 : 0) : gen + 1;
+          queue.push([parent, nextGen]);
+        }
+      }
     }
-    for (const oid of generation.keys()) {
+    for (const oid of level.keys()) {
       if (!held.has(oid) && !shallowHeld.has(oid)) included.add(oid);
     }
     // A held want at the last generation is not a boundary: the client has its objects.
@@ -319,12 +349,17 @@ function planFetch(repo: Repo, request: FetchRequest): FetchPlan {
 export function fetchV2(repo: Repo, request: FetchRequest): Buffer {
   const plan = planFetch(repo, request);
   const parts: Buffer[] = [];
-  parts.push(pktLine('acknowledgments\n'));
-  const acked = request.haves.find((have) => repo.getObject(have) !== undefined || repo.peelToCommit(have) !== null);
-  if (acked !== undefined) parts.push(pktLine(`ACK ${repo.peelToCommit(acked) ?? acked}\n`));
-  else parts.push(pktLine('NAK\n'));
-  parts.push(pktLine('ready\n'));
-  parts.push(PKT_DELIM);
+  if (!request.done) {
+    // No `done` yet: git's upload-pack answers acknowledgments, and a `ready` line volunteers
+    // the packfile in the same response (which then follows below). A request that carries
+    // `done` must be answered with the packfile directly, no acknowledgments section.
+    parts.push(pktLine('acknowledgments\n'));
+    const acked = request.haves.find((have) => repo.getObject(have) !== undefined || repo.peelToCommit(have) !== null);
+    if (acked !== undefined) parts.push(pktLine(`ACK ${repo.peelToCommit(acked) ?? acked}\n`));
+    else parts.push(pktLine('NAK\n'));
+    parts.push(pktLine('ready\n'));
+    parts.push(PKT_DELIM);
+  }
   if (plan.shallowInfo.length > 0 || plan.unshallow.length > 0) {
     parts.push(pktLine('shallow-info\n'));
     for (const oid of plan.shallowInfo) parts.push(pktLine(`shallow ${oid}\n`));
@@ -359,19 +394,21 @@ export function parseFetchBody(packets: Packet[]): { command: string; args: stri
   if (!commandLine.startsWith('command=')) return null;
   const command = commandLine.slice('command='.length);
   const args = lines.slice(1);
-  const request: FetchRequest = { wants: [], haves: [], shallow: [], depth: null };
+  const request: FetchRequest = { wants: [], haves: [], shallow: [], depth: null, deepenRelative: false, done: false };
   for (const arg of args) {
     if (arg.startsWith('want ')) request.wants.push(arg.slice(5).trim());
     else if (arg.startsWith('have ')) request.haves.push(arg.slice(5).trim());
     else if (arg.startsWith('shallow ')) request.shallow.push(arg.slice(8).trim());
     else if (arg.startsWith('deepen ')) request.depth = Number(arg.slice(7).trim());
+    else if (arg === 'deepen-relative') request.deepenRelative = true;
+    else if (arg === 'done') request.done = true;
   }
   return { command, args, request };
 }
 
 /** Parse a v0 upload-pack request body (want section, flush, have section, flush). */
 export function parseFetchBodyV0(packets: Packet[]): FetchRequest {
-  const request: FetchRequest = { wants: [], haves: [], shallow: [], depth: null };
+  const request: FetchRequest = { wants: [], haves: [], shallow: [], depth: null, deepenRelative: false, done: true };
   let section = 0;
   for (const packet of packets) {
     if (packet.kind === 'flush') {

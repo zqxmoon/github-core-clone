@@ -5,9 +5,6 @@
 // HTTP 200 with an errors array naming the field, as GitHub answers.
 
 import {
-  IssueState,
-  PullState,
-  Repo,
   VIEWER_LOGIN,
   createIssue,
   createPull,
@@ -17,7 +14,9 @@ import {
   nextTimestampSec,
   pullConflicts,
 } from './forge.ts';
-import { Ctx, Reply, globalId, jsonReply, parseGlobalId } from './http.ts';
+import type { IssueState, PullState, Repo } from './forge.ts';
+import { globalId, jsonReply, parseGlobalId } from './http.ts';
+import type { Ctx, Reply } from './http.ts';
 
 // ---------------------------------------------------------------------------
 // schema: the field and enum surface introspection reports and validation uses.
@@ -329,7 +328,7 @@ class Parser {
       this.expect('}');
       return { kind: 'object', fields };
     }
-    if (token.startsWith('"')) return { kind: 'string', value: token.slice(1) };
+    if (token.startsWith('"')) return { kind: 'string', value: token.slice(1, token.length - 1) };
     if (token === 'true' || token === 'false') return { kind: 'boolean', value: token === 'true' };
     if (token === 'null') return { kind: 'null' };
     if (/^-?\d+$/.test(token)) return { kind: 'int', value: Number(token) };
